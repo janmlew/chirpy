@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/janmlew/chirpy/internal/auth"
 	"github.com/janmlew/chirpy/internal/database"
 	"github.com/joho/godotenv"
 
@@ -64,6 +65,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerCreateUser)
+	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlerCreateChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirp)
@@ -143,7 +145,8 @@ func cleanBody(body string) string {
 
 func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	params := parameters{}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
@@ -151,13 +154,53 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	user, err := cfg.db.CreateUser(r.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't hash password")
+		return
+	}
+
+	user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create user")
 		return
 	}
 
 	respondWithJSON(w, http.StatusCreated, User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	})
+}
+
+func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	params := parameters{}
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters")
+		return
+	}
+
+	user, err := cfg.db.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+	if err != nil || !match {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, User{
 		ID:        user.ID,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
