@@ -1,6 +1,11 @@
 package auth
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+)
 
 func TestHashPassword(t *testing.T) {
 	password := "correct-horse-battery-staple"
@@ -101,5 +106,54 @@ func TestCheckPasswordHash(t *testing.T) {
 				t.Fatalf("CheckPasswordHash() match = %v, want %v", match, tt.wantMatch)
 			}
 		})
+	}
+}
+
+func TestMakeAndValidateJWT(t *testing.T) {
+	userID := uuid.New()
+	secret := "my-super-secret-key"
+
+	token, err := MakeJWT(userID, secret, time.Hour)
+	if err != nil {
+		t.Fatalf("MakeJWT returned an error: %v", err)
+	}
+	if token == "" {
+		t.Fatal("MakeJWT returned an empty token")
+	}
+
+	gotID, err := ValidateJWT(token, secret)
+	if err != nil {
+		t.Fatalf("ValidateJWT returned an error: %v", err)
+	}
+	if gotID != userID {
+		t.Fatalf("ValidateJWT returned id %v, want %v", gotID, userID)
+	}
+}
+
+func TestValidateJWTRejectsExpiredToken(t *testing.T) {
+	userID := uuid.New()
+	secret := "my-super-secret-key"
+
+	// expiresIn in the past → the token is already expired when created.
+	token, err := MakeJWT(userID, secret, -time.Hour)
+	if err != nil {
+		t.Fatalf("MakeJWT returned an error: %v", err)
+	}
+
+	if _, err := ValidateJWT(token, secret); err == nil {
+		t.Fatal("expected ValidateJWT to reject an expired token, got nil error")
+	}
+}
+
+func TestValidateJWTRejectsWrongSecret(t *testing.T) {
+	userID := uuid.New()
+
+	token, err := MakeJWT(userID, "correct-secret", time.Hour)
+	if err != nil {
+		t.Fatalf("MakeJWT returned an error: %v", err)
+	}
+
+	if _, err := ValidateJWT(token, "wrong-secret"); err == nil {
+		t.Fatal("expected ValidateJWT to reject a token signed with a different secret, got nil error")
 	}
 }
