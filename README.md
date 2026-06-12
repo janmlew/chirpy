@@ -231,12 +231,14 @@ User resource shape:
   "id": "uuid",
   "created_at": "timestamp",
   "updated_at": "timestamp",
-  "email": "user@example.com"
+  "email": "user@example.com",
+  "is_chirpy_red": false
 }
 ```
 
-Passwords are hashed with Argon2id before storage and are **never** returned in
-responses.
+`is_chirpy_red` indicates a "Chirpy Red" membership (see
+[Webhooks](#webhooks)). Passwords are hashed with Argon2id before storage and
+are **never** returned in responses.
 
 ### Tokens
 
@@ -257,6 +259,7 @@ On login the response includes both:
   "created_at": "timestamp",
   "updated_at": "timestamp",
   "email": "user@example.com",
+  "is_chirpy_red": false,
   "token": "<access JWT, 1h>",
   "refresh_token": "<refresh token, 60d>"
 }
@@ -295,6 +298,17 @@ Chirp rules:
 - Maximum **140 characters** — longer bodies return `400 "Chirp is too long"`.
 - Profanity (`kerfuffle`, `sharbert`, `fornax`, case-insensitive, whole word
   only) is replaced with `****` before the chirp is stored.
+
+### Webhooks
+
+| Method | Path | Body | Success |
+| --- | --- | --- | --- |
+| `POST` | `/api/polka/webhooks` | `{ "event", "data": { "user_id" } }` | `204` |
+
+Polka (the payment provider) calls this when a user subscribes to **Chirpy
+Red**. On a `user.upgraded` event the user's `is_chirpy_red` is set to `true` and
+the endpoint returns `204`; a missing user returns `404`. Any other event is
+acknowledged with `204` and ignored. Polka retries on any non-`2XX` response.
 
 ---
 
@@ -369,7 +383,8 @@ chirpy/
     │   ├── 001_users.sql
     │   ├── 002_chirps.sql
     │   ├── 003_add_hashed_password.sql
-    │   └── 004_refresh_tokens.sql
+    │   ├── 004_refresh_tokens.sql
+    │   └── 005_add_is_chirpy_red.sql
     └── queries/            # source SQL that sqlc turns into Go
         ├── users.sql
         ├── chirps.sql
@@ -387,6 +402,7 @@ chirpy/
 | `updated_at` | `TIMESTAMP` | not null |
 | `email` | `TEXT` | not null, unique |
 | `hashed_password` | `TEXT` | not null, defaults to `'unset'` |
+| `is_chirpy_red` | `BOOLEAN` | not null, defaults to `false` |
 
 **chirps**
 
