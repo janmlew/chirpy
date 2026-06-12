@@ -132,8 +132,27 @@ go mod tidy
 
 ### 2. Create the database
 
+On a **fresh Postgres install** the only role is the `postgres` superuser, and it
+has no password set — so a bare `createdb chirpy` (which connects as *your* OS
+user) fails with `role "<you>" does not exist`. Because this project connects as
+`postgres` (see `DB_URL` below), set that role's password once and create the DB
+as the `postgres` superuser:
+
 ```bash
-createdb chirpy
+# give the postgres role a password so the app's TCP connection can authenticate
+sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
+
+# create the database, owned by the postgres role
+sudo -u postgres createdb chirpy
+```
+
+> `sudo -u postgres …` runs as the `postgres` OS user, which Postgres trusts via
+> local *peer* authentication — no password needed for these admin commands.
+
+Verify the app's exact connection string authenticates:
+
+```bash
+psql "postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable" -c "select 1;"
 ```
 
 ### 3. Configure environment
@@ -143,18 +162,29 @@ Create a `.env` file in the project root:
 ```env
 DB_URL="postgres://<user>:<password>@localhost:5432/chirpy?sslmode=disable"
 PLATFORM="dev"
+JWT_SECRET="<a long random string>"
+```
+
+Generate a strong `JWT_SECRET` with:
+
+```bash
+openssl rand -base64 64
 ```
 
 | Variable | Purpose |
 | --- | --- |
 | `DB_URL` | PostgreSQL connection string used by the server and migrations. |
 | `PLATFORM` | Environment guard. `POST /admin/reset` only works when this is `dev`; otherwise it returns `403 Forbidden`. |
+| `JWT_SECRET` | Secret key used to sign and verify JWTs. Keep it out of Git — anyone with it can mint valid tokens for your server. |
 
 ### 4. Run database migrations
 
-Migrations live in `sql/schema/` and are applied with goose:
+Migrations live in `sql/schema/` and are applied with goose. Note that
+`godotenv` only loads `.env` for the *running app* — your shell doesn't have
+`DB_URL`, so export it first (or inline the connection string):
 
 ```bash
+export DB_URL="postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
 goose postgres "$DB_URL" -dir sql/schema up
 ```
 
@@ -186,10 +216,12 @@ Base URL: `http://localhost:8080`
 
 ### Users & auth
 
-| Method | Path | Body | Success |
-| --- | --- | --- | --- |
-| `POST` | `/api/users` | `{ "email", "password" }` | `201` + user resource (no password) |
-| `POST` | `/api/login` | `{ "email", "password" }` | `200` + user resource, or `401 "Incorrect email or password"` |
+| Method | Path | Auth | Body | Success |
+| --- | --- | --- | --- | --- |
+| `POST` | `/api/users` | — | `{ "email", "password" }` | `201` + user resource (no password) |
+| `POST` | `/api/login` | — | `{ "email", "password" }` | `200` + user resource **plus `token` + `refresh_token`**, or `401 "Incorrect email or password"` |
+| `POST` | `/api/refresh` | **Bearer refresh token** | — | `200` + `{ "token": "<new access JWT>" }`, or `401` if the refresh token is missing/expired/revoked |
+| `POST` | `/api/revoke` | **Bearer refresh token** | — | `204 No Content` (refresh token is revoked) |
 
 User resource shape:
 
@@ -205,13 +237,45 @@ User resource shape:
 Passwords are hashed with Argon2id before storage and are **never** returned in
 responses.
 
+### Tokens
+
+Chirpy uses two token types:
+
+- **Access token** — a short-lived JWT (**1 hour**), sent as
+  `Authorization: Bearer <token>` to authenticate API requests. Stateless; not
+  stored server-side.
+- **Refresh token** — a long-lived (**60 day**) random 256-bit string, stored in
+  the `refresh_tokens` table. Used only to obtain new access tokens via
+  `/api/refresh`, and can be invalidated via `/api/revoke`.
+
+On login the response includes both:
+
+```json
+{
+  "id": "uuid",
+  "created_at": "timestamp",
+  "updated_at": "timestamp",
+  "email": "user@example.com",
+  "token": "<access JWT, 1h>",
+  "refresh_token": "<refresh token, 60d>"
+}
+```
+
+`/api/refresh` and `/api/revoke` both take the **refresh token** in the
+`Authorization: Bearer <refresh-token>` header (not the access JWT). A refresh
+token that is expired or revoked is rejected with `401`.
+
 ### Chirps
 
-| Method | Path | Body | Success |
-| --- | --- | --- | --- |
-| `POST` | `/api/chirps` | `{ "body", "user_id" }` | `201` + chirp resource |
-| `GET` | `/api/chirps` | — | `200` + array of chirps (oldest first) |
-| `GET` | `/api/chirps/{chirpID}` | — | `200` + chirp resource, or `404` |
+| Method | Path | Auth | Body | Success |
+| --- | --- | --- | --- | --- |
+| `POST` | `/api/chirps` | **Bearer JWT** | `{ "body" }` | `201` + chirp resource, or `401` if the JWT is missing/invalid |
+| `GET` | `/api/chirps` | — | — | `200` + array of chirps (oldest first) |
+| `GET` | `/api/chirps/{chirpID}` | — | — | `200` + chirp resource, or `404` |
+
+Creating a chirp requires a valid JWT in the `Authorization: Bearer <token>`
+header (obtained from `/api/login`). The chirp's `user_id` is taken from the
+token's subject — it is **not** read from the request body.
 
 Chirp resource shape:
 
@@ -242,15 +306,20 @@ single shared `apiConfig` struct rather than globals.
   All HTTP handlers and the API-facing response structs (`User`, `Chirp`) live
   here.
 - **`apiConfig`** — holds shared dependencies: the `*database.Queries` handle,
-  the in-memory request counter (`atomic.Int32`), and the `platform` flag.
-  Handlers are methods on `*apiConfig` so they can reach the database and state.
+  the in-memory request counter (`atomic.Int32`), the `platform` flag, and the
+  `jwtSecret` used to sign/verify tokens. Handlers are methods on `*apiConfig`
+  so they can reach the database and state.
 - **Middleware** — `middlewareMetricsInc` wraps the fileserver handler to count
   requests to `/app/`.
 - **`internal/auth`** — security primitives, decoupled from HTTP and the DB:
   - `HashPassword` / `CheckPasswordHash` — Argon2id password hashing.
   - `MakeJWT` / `ValidateJWT` — issue and verify HS256 JWTs (`chirpy-access`
-    issuer). *Present and unit-tested; wired into request authentication in an
-    upcoming step.*
+    issuer). `/api/login` issues a token; `POST /api/chirps` validates it to
+    authenticate the request.
+  - `GetBearerToken` — extracts the token from an `Authorization: Bearer <token>`
+    request header.
+  - `MakeRefreshToken` — generates a random 256-bit hex-encoded refresh token
+    (`crypto/rand`).
 - **`internal/database`** — **generated by sqlc; do not edit by hand.** Provides
   `Queries`, model structs (`User`, `Chirp`), and one Go method per SQL query.
 
@@ -281,7 +350,7 @@ chirpy/
 ├── main.go                 # server, handlers, API response structs
 ├── go.mod / go.sum         # module + dependencies
 ├── sqlc.yaml               # sqlc config (schema/queries → internal/database)
-├── .env                    # DB_URL, PLATFORM (not committed)
+├── .env                    # DB_URL, PLATFORM, JWT_SECRET (not committed)
 ├── index.html              # static web app served at /app/
 ├── internal/
 │   ├── auth/
@@ -291,15 +360,18 @@ chirpy/
 │       ├── db.go
 │       ├── models.go
 │       ├── users.sql.go
-│       └── chirps.sql.go
+│       ├── chirps.sql.go
+│       └── refresh_tokens.sql.go
 └── sql/
     ├── schema/             # goose migrations (run in numeric order)
     │   ├── 001_users.sql
     │   ├── 002_chirps.sql
-    │   └── 003_add_hashed_password.sql
+    │   ├── 003_add_hashed_password.sql
+    │   └── 004_refresh_tokens.sql
     └── queries/            # source SQL that sqlc turns into Go
         ├── users.sql
-        └── chirps.sql
+        ├── chirps.sql
+        └── refresh_tokens.sql
 ```
 
 ### Database schema
@@ -324,7 +396,18 @@ chirpy/
 | `body` | `TEXT` | not null |
 | `user_id` | `UUID` | not null, FK → `users(id)` `ON DELETE CASCADE` |
 
-Deleting a user cascades to delete all of their chirps.
+**refresh_tokens**
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `token` | `TEXT` | primary key (random 256-bit hex string) |
+| `created_at` | `TIMESTAMP` | not null |
+| `updated_at` | `TIMESTAMP` | not null |
+| `user_id` | `UUID` | not null, FK → `users(id)` `ON DELETE CASCADE` |
+| `expires_at` | `TIMESTAMP` | not null (60 days after creation) |
+| `revoked_at` | `TIMESTAMP` | nullable; set when the token is revoked |
+
+Deleting a user cascades to delete all of their chirps and refresh tokens.
 
 ---
 
