@@ -219,6 +219,7 @@ Base URL: `http://localhost:8080`
 | Method | Path | Auth | Body | Success |
 | --- | --- | --- | --- | --- |
 | `POST` | `/api/users` | — | `{ "email", "password" }` | `201` + user resource (no password) |
+| `PUT` | `/api/users` | **Bearer access JWT** | `{ "email", "password" }` | `200` + updated user resource (no password), or `401` if the access token is missing/invalid |
 | `POST` | `/api/login` | — | `{ "email", "password" }` | `200` + user resource **plus `token` + `refresh_token`**, or `401 "Incorrect email or password"` |
 | `POST` | `/api/refresh` | **Bearer refresh token** | — | `200` + `{ "token": "<new access JWT>" }`, or `401` if the refresh token is missing/expired/revoked |
 | `POST` | `/api/revoke` | **Bearer refresh token** | — | `204 No Content` (refresh token is revoked) |
