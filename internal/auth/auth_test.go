@@ -202,3 +202,47 @@ func TestGetBearerToken(t *testing.T) {
 		})
 	}
 }
+
+func TestGetAPIKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers http.Header
+		wantKey string
+		wantErr bool
+	}{
+		{
+			name:    "valid api key",
+			headers: http.Header{"Authorization": []string{"ApiKey my-key-123"}},
+			wantKey: "my-key-123",
+			wantErr: false,
+		},
+		{
+			name:    "missing authorization header",
+			headers: http.Header{},
+			wantErr: true,
+		},
+		{
+			name:    "wrong scheme (Bearer not ApiKey)",
+			headers: http.Header{"Authorization": []string{"Bearer my-key-123"}},
+			wantKey: "Bearer my-key-123",
+			wantErr: false,
+		},
+		{
+			name:    "apikey prefix but no key",
+			headers: http.Header{"Authorization": []string{"ApiKey "}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GetAPIKey(tt.headers)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetAPIKey() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.wantKey {
+				t.Fatalf("GetAPIKey() = %q, want %q", got, tt.wantKey)
+			}
+		})
+	}
+}
