@@ -276,7 +276,7 @@ token that is expired or revoked is rejected with `401`.
 | Method | Path | Auth | Body | Success |
 | --- | --- | --- | --- | --- |
 | `POST` | `/api/chirps` | **Bearer JWT** | `{ "body" }` | `201` + chirp resource, or `401` if the JWT is missing/invalid |
-| `GET` | `/api/chirps` | — | — | `200` + array of chirps (oldest first) |
+| `GET` | `/api/chirps` | — | — | `200` + array of chirps; optional `?author_id=<uuid>` filters to one author, optional `?sort=asc\|desc` orders by `created_at` (default `asc`) |
 | `GET` | `/api/chirps/{chirpID}` | — | — | `200` + chirp resource, or `404` |
 | `DELETE` | `/api/chirps/{chirpID}` | **Bearer access JWT** | — | `204` if deleted; `401` (missing/invalid token), `403` (not the author), or `404` (no such chirp) |
 
